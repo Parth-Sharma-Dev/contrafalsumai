@@ -1,180 +1,495 @@
-from duckduckgo_search import DDGS
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from typing import Any
+from __future__ import annotations
+
 import asyncio
+import json
+import os
+import re
+import time
+from typing import Any
 
-# Ensure required NLTK datasets are downloaded
-try:
-    nltk.data.find("taggers/averaged_perceptron_tagger_eng")
-except LookupError:
-    nltk.download("averaged_perceptron_tagger_eng")
+import dotenv
 
+dotenv.load_dotenv()
 
+import nltk
+from google import genai
+from google.genai import types
+from google.genai.errors import ClientError
+from ddgs import DDGS
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+
+# ── NLTK bootstrap ────────────────────────────────────────────────────────────
+for _resource, _pkg in [
+    ("tokenizers/punkt", "punkt"),
+    ("tokenizers/punkt_tab", "punkt_tab"),
+    ("taggers/averaged_perceptron_tagger_eng", "averaged_perceptron_tagger_eng"),
+    ("corpora/stopwords", "stopwords"),
+]:
+    try:
+        nltk.data.find(_resource)
+    except LookupError:
+        nltk.download(_pkg)
+
+# ── Trusted domains ───────────────────────────────────────────────────────────
 TRUSTED_DOMAINS: list[str] = [
-    # ── GLOBAL WIRE SERVICES (most cited, highest editorial standards) ──
-    "apnews.com",  # Associated Press
-    "reuters.com",  # Reuters
-    "afp.com",  # Agence France-Presse
-    # ── MAJOR INTERNATIONAL BROADCASTERS ──
-    "bbc.com",  # BBC News
-    "bbc.co.uk",  # BBC News (UK)
-    "dw.com",  # Deutsche Welle
-    "france24.com",  # France 24
-    "aljazeera.com",  # Al Jazeera English
-    "rfi.fr",  # Radio France Internationale
-    "abc.net.au",  # ABC Australia
-    "cbc.ca",  # CBC (Canada)
-    "rte.ie",  # RTÉ (Ireland)
-    "nhk.or.jp",  # NHK (Japan)
-    # ── US NEWSPAPERS & DIGITAL ──
-    "nytimes.com",  # The New York Times
-    "washingtonpost.com",  # The Washington Post
-    "wsj.com",  # The Wall Street Journal
-    "theguardian.com",  # The Guardian (US edition)
-    "npr.org",  # NPR
-    "pbs.org",  # PBS NewsHour
-    "theatlantic.com",  # The Atlantic
-    "politico.com",  # Politico
-    "thehill.com",  # The Hill
-    "csmonitor.com",  # Christian Science Monitor
-    "usatoday.com",  # USA Today
-    # ── BUSINESS & FINANCE ──
-    "bloomberg.com",  # Bloomberg
-    "ft.com",  # Financial Times
-    "economist.com",  # The Economist
-    "forbes.com",  # Forbes
-    "businessinsider.com",  # Business Insider
-    # ── UK & EUROPEAN OUTLETS ──
-    "theguardian.com",  # The Guardian (UK)
-    "telegraph.co.uk",  # The Daily Telegraph
-    "thetimes.co.uk",  # The Times (UK)
-    "independent.co.uk",  # The Independent
-    "euronews.com",  # Euronews
-    "spiegel.de",  # Der Spiegel (Germany)
-    "lemonde.fr",  # Le Monde (France)
-    "elpais.com",  # El País (Spain)
-    # ── SCIENCE & SPECIALIZED ──
-    "nature.com",  # Nature
-    "science.org",  # Science Magazine
-    "newscientist.com",  # New Scientist
-    "scientificamerican.com",  # Scientific American
-    "foreignpolicy.com",  # Foreign Policy
-    "foreignaffairs.com",  # Foreign Affairs
-    # ── ASIA-PACIFIC ──
-    "straitstimes.com",  # The Straits Times (Singapore)
-    "scmp.com",  # South China Morning Post
-    "japantimes.co.jp",  # The Japan Times
-    "koreatimes.co.kr",  # Korea Times
-    "bangkokpost.com",  # Bangkok Post
-    # ── FACT-CHECKERS (GLOBAL) ──
-    "snopes.com",  # Snopes
-    "factcheck.org",  # FactCheck.org
-    "politifact.com",  # PolitiFact
-    "fullfact.org",  # Full Fact (UK)
-    # ──────────────────────────────────────
-    # ── INDIAN NEWS OUTLETS ──
-    # ──────────────────────────────────────
-    # ── MOST BALANCED / EDITORIAL INDEPENDENCE ──
-    "thehindu.com",  # The Hindu
-    "indianexpress.com",  # The Indian Express
-    "hindustantimes.com",  # Hindustan Times
-    "livemint.com",  # Mint (business/economy)
-    "business-standard.com",  # Business Standard
-    # ── WIRE SERVICES (INDIA) ──
-    "ptinews.com",  # Press Trust of India (PTI)
-    "uniindia.com",  # United News of India (UNI)
-    "ani.net.in",  # Asian News International (ANI)
-    # ── DIGITAL & INVESTIGATIVE ──
-    "scroll.in",  # Scroll.in
-    "thewire.in",  # The Wire
-    "theprint.in",  # The Print
-    "thequint.com",  # The Quint
-    "ndtv.com",  # NDTV
-    "thenewsminute.com",  # The News Minute (South India)
-    # ── BROADCAST ──
-    "ddnews.gov.in",  # DD News (Doordarshan)
-    "allindiaradio.gov.in",  # All India Radio
-    # ── REGIONAL ENGLISH DAILIES ──
-    "deccanherald.com",  # Deccan Herald
-    "tribuneindia.com",  # The Tribune
-    "telegraphindia.com",  # The Telegraph (Kolkata)
-    "newindianexpress.com",  # The New Indian Express
-    "thestatesman.com",  # The Statesman
-    # ── FACT-CHECKERS (INDIA) ──
-    "boomlive.in",  # BOOM Live
-    "altnews.in",  # Alt News
-    "factchecker.in",  # FactChecker.in
-    "vishvasnews.com",  # Vishvas News
+    "apnews.com",
+    "reuters.com",
+    "afp.com",
+    "bbc.com",
+    "bbc.co.uk",
+    "dw.com",
+    "france24.com",
+    "aljazeera.com",
+    "rfi.fr",
+    "abc.net.au",
+    "cbc.ca",
+    "rte.ie",
+    "nhk.or.jp",
+    "nytimes.com",
+    "washingtonpost.com",
+    "wsj.com",
+    "theguardian.com",
+    "npr.org",
+    "pbs.org",
+    "theatlantic.com",
+    "politico.com",
+    "thehill.com",
+    "csmonitor.com",
+    "usatoday.com",
+    "bloomberg.com",
+    "ft.com",
+    "economist.com",
+    "forbes.com",
+    "businessinsider.com",
+    "telegraph.co.uk",
+    "thetimes.co.uk",
+    "independent.co.uk",
+    "euronews.com",
+    "spiegel.de",
+    "lemonde.fr",
+    "elpais.com",
+    "nature.com",
+    "science.org",
+    "newscientist.com",
+    "scientificamerican.com",
+    "foreignpolicy.com",
+    "foreignaffairs.com",
+    "straitstimes.com",
+    "scmp.com",
+    "japantimes.co.jp",
+    "koreatimes.co.kr",
+    "bangkokpost.com",
+    "snopes.com",
+    "factcheck.org",
+    "politifact.com",
+    "fullfact.org",
+    "thehindu.com",
+    "indianexpress.com",
+    "hindustantimes.com",
+    "livemint.com",
+    "business-standard.com",
+    "ptinews.com",
+    "uniindia.com",
+    "ani.net.in",
+    "scroll.in",
+    "thewire.in",
+    "theprint.in",
+    "thequint.com",
+    "ndtv.com",
+    "thenewsminute.com",
+    "ddnews.gov.in",
+    "allindiaradio.gov.in",
+    "deccanherald.com",
+    "tribuneindia.com",
+    "telegraphindia.com",
+    "newindianexpress.com",
+    "thestatesman.com",
+    "boomlive.in",
+    "altnews.in",
+    "factchecker.in",
+    "vishvasnews.com",
 ]
 
 
-def extract_search_query(text: str, max_keywords: int = 10) -> str:
+GEMINI_MODEL = "gemini-2.5-flash-lite"
+
+# ── Gemini client (lazy-initialised) ─────────────────────────────────────────
+_gemini_client: genai.Client | None = None
+
+
+def _get_client() -> genai.Client:
+    global _gemini_client
+    if _gemini_client is None:
+        _gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    return _gemini_client
+
+
+# ── Shared retry helpers ──────────────────────────────────────────────────────
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    msg = str(e)
+    return "429" in msg or "RESOURCE_EXHAUSTED" in msg
+
+
+def _parse_retry_delay(e: Exception) -> float:
+    try:
+        match = re.search(r"retryDelay.*?(\d+(?:\.\d+)?)\s*s", str(e))
+        if match:
+            return float(match.group(1)) + 1.0
+    except Exception:
+        pass
+    return 5.0
+
+
+def _call_gemini(
+    prompt: str, system: str, max_tokens: int = 100, max_retries: int = 3
+) -> str | None:
     """
-    Uses POS tagging to extract the 'Who, What, and How Much'.
+    Central Gemini call with 429 retry logic.
+    Returns the response text, or None on failure.
     """
+    client = _get_client()
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt.strip(),
+                config=types.GenerateContentConfig(
+                    system_instruction=system,
+                    max_output_tokens=max_tokens,
+                    temperature=0.0,
+                ),
+            )
+            return response.text.strip()
+        except ClientError as e:
+            if _is_rate_limit_error(e):
+                delay = _parse_retry_delay(e)
+                print(
+                    f"[gemini] Rate limited. Waiting {delay:.1f}s "
+                    f"(attempt {attempt}/{max_retries})..."
+                )
+                time.sleep(delay)
+            else:
+                print(f"[gemini] Non-recoverable error: {e}")
+                return None
+        except Exception as e:
+            print(f"[gemini] Unexpected error: {e}")
+            return None
+    print(f"[gemini] All {max_retries} retries exhausted.")
+    return None
+
+
+# STEP 1 — Extract search query
+
+_QUERY_EXTRACTION_PROMPT = """\
+You are a search-query distillation expert for a fake-news verification system.
+
+Given a piece of text (which may be real or fabricated news), extract the single
+most verifiable, specific factual claim at its core and convert it into a short,
+precise DuckDuckGo search query (4–9 words).
+
+Rules:
+- Capture the KEY CLAIM: who did what, what was invented/announced/approved.
+- Include the most specific named entities: organisations, people, technologies,
+  places, policy names.
+- Omit adjectives like "shocking", "revolutionary", "greatest".
+- Omit filler verbs like "said", "claimed", "reported".
+- DO NOT include synonyms, alternatives, or multiple queries.
+- Output ONLY the raw query string. No quotes. No explanation. No punctuation.
+
+Examples
+--------
+Input : "Scientists at MIT have cured cancer using a new AI drug they call NeuroHeal"
+Output: MIT scientists cured cancer NeuroHeal AI drug
+
+Input : "The Reserve Bank of India has approved Quantum Rupee cryptocurrency for official use"
+Output: Reserve Bank India approved Quantum Rupee cryptocurrency
+
+Input : "PM Modi declared a national emergency over floods in Assam"
+Output: Modi national emergency floods Assam
+"""
+
+_JOURNALISM_FILLER: set[str] = {
+    "media",
+    "reports",
+    "indicate",
+    "claim",
+    "claiming",
+    "said",
+    "told",
+    "according",
+    "outlets",
+    "news",
+    "one",
+    "two",
+    "first",
+    "second",
+    "either",
+    "member",
+    "also",
+    "however",
+    "says",
+    "say",
+    "shocking",
+    "revolutionary",
+    "greatest",
+    "major",
+    "new",
+    "big",
+}
+
+
+def _pos_extract_query(text: str, max_words: int = 8) -> str:
+    """POS-tagger fallback when Gemini is unavailable."""
+    stop_words = set(stopwords.words("english")) | _JOURNALISM_FILLER
     tokens = word_tokenize(text)
-    tagged_words = nltk.pos_tag(tokens)
-    stop_words = set(stopwords.words("english"))
-    target_tags = {"NNP", "NNPS", "NN", "NNS", "CD"}
+    tagged = nltk.pos_tag(tokens)
 
-    keywords: list[str] = []
-    seen = set()
+    proper_nouns: list[str] = []
+    numbers: list[str] = []
+    verbs: list[str] = []
+    nouns: list[str] = []
+    seen: set[str] = set()
 
-    for word, tag in tagged_words:
-        clean_word = word.lower()
-        if tag in target_tags and clean_word not in stop_words and len(clean_word) > 1:
-            if clean_word not in seen:
-                seen.add(clean_word)
-                keywords.append(word)
+    for word, tag in tagged:
+        cw = word.lower()
+        if not word.isalpha() or cw in stop_words or len(cw) < 2 or cw in seen:
+            continue
+        seen.add(cw)
+        if tag in {"NNP", "NNPS"}:
+            proper_nouns.append(word)
+        elif tag == "CD":
+            numbers.append(word)
+        elif tag in {"VBD", "VBN", "VBZ", "VBG"}:
+            verbs.append(word)
+        elif tag in {"NN", "NNS"}:
+            nouns.append(word)
 
-    return " ".join(keywords[:max_keywords])
+    parts: list[str] = []
+    parts.extend(proper_nouns[:3])
+    parts.extend(numbers[:1])
+    parts.extend(verbs[:2])
+    parts.extend(nouns[:2])
+    return " ".join(parts[:max_words])
+
+
+def extract_search_query(text: str) -> str:
+    raw = _call_gemini(text, _QUERY_EXTRACTION_PROMPT, max_tokens=60)
+    if raw and 2 <= len(raw.split()) <= 12:
+        print(f"[extract] Gemini query : '{raw}'")
+        return raw
+    fallback = _pos_extract_query(text)
+    print(f"[extract] POS fallback : '{fallback}'")
+    return fallback
+
+
+# STEP 2 — DDG search
+
+
+def _get_url(result: dict[str, Any]) -> str:
+    return (result.get("href") or result.get("url") or "").lower()
+
+
+def _fetch_search_results(query: str, retries: int = 3) -> list[dict[str, Any]]:
+    ddgs = DDGS()
+
+    def _search(q: str) -> list[dict[str, Any]]:
+        for attempt in range(retries):
+            try:
+                results = list(ddgs.text(q, max_results=15))
+                if results:
+                    return results
+            except Exception as e:
+                print(f"[DDG] Attempt {attempt + 1} failed for '{q}': {e}")
+                time.sleep(1.5 * (attempt + 1))
+        return []
+
+    results = _search(query)
+    if not results:
+        words = query.split()
+        if len(words) > 4:
+            short = " ".join(words[:4])
+            print(f"[DDG] Fallback → '{short}'")
+            results = _search(short)
+    return results
+
+
+def _filter_trusted(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only results from trusted domains."""
+    return [
+        r for r in results if any(domain in _get_url(r) for domain in TRUSTED_DOMAINS)
+    ]
+
+
+# STEP 3 — Gemini verifies whether results actually confirm the claim
+
+_VERIFICATION_SYSTEM_PROMPT = """\
+You are a fact-checking assistant. Your job is to determine whether a set of
+news article snippets from trusted sources actually CONFIRMS a specific claim.
+
+Rules:
+- A result CONFIRMS the claim only if its title/snippet directly reports the
+  same specific event, fact, or announcement — not just a related topic.
+- A result that merely mentions similar keywords (e.g. "IIT Bombay" or
+  "cryptocurrency") without confirming the actual claim does NOT count.
+- A result that DEBUNKS or fact-checks the claim should be noted separately.
+- Be strict: absence of confirmation = not confirmed.
+
+Respond ONLY with a valid JSON object in this exact format (no markdown, no explanation):
+{
+  "confirmed_count": <int>,
+  "debunked_count": <int>,
+  "verdict": "<CONFIRMED | UNCONFIRMED | DEBUNKED>",
+  "reasoning": "<one sentence explaining your verdict>"
+}
+
+Verdict rules:
+- CONFIRMED   : 1 or more results directly confirm the claim AND none debunk it
+- DEBUNKED    : 1 or more results explicitly fact-check or refute the claim
+- UNCONFIRMED : results exist but none actually confirm or debunk the claim
+"""
+
+
+def _build_verification_prompt(claim: str, results: list[dict[str, Any]]) -> str:
+    snippets = []
+    for i, r in enumerate(results[:10], 1):  # cap at 10 to stay within tokens
+        url = _get_url(r)
+        title = r.get("title", "")
+        body = r.get("body", "")[:300]  # trim long snippets
+        snippets.append(f"[{i}] URL: {url}\n    Title: {title}\n    Snippet: {body}")
+
+    joined = "\n\n".join(snippets)
+    return (
+        f"CLAIM TO VERIFY:\n{claim}\n\n"
+        f"SEARCH RESULT SNIPPETS FROM TRUSTED SOURCES:\n{joined}"
+    )
+
+
+def _gemini_verify(claim: str, trusted_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Ask Gemini to judge whether the trusted results actually confirm the claim.
+    Returns a structured verdict dict.
+    """
+    if not trusted_results:
+        return {
+            "confirmed_count": 0,
+            "debunked_count": 0,
+            "verdict": "UNCONFIRMED",
+            "reasoning": "No results from trusted sources were found.",
+        }
+
+    prompt = _build_verification_prompt(claim, trusted_results)
+    raw = _call_gemini(prompt, _VERIFICATION_SYSTEM_PROMPT, max_tokens=200)
+
+    if not raw:
+        # Gemini unavailable — fall back to old keyword approach
+        print("[verify] Gemini unavailable, using keyword fallback")
+        return _keyword_fallback(trusted_results)
+
+    # Strip markdown fences if model wraps in ```json ... ```
+    raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"[verify] Could not parse Gemini JSON: {raw!r}")
+        return _keyword_fallback(trusted_results)
+
+
+def _keyword_fallback(trusted_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Last-resort keyword check when Gemini is completely unavailable."""
+    DEBUNK_KEYWORDS = {
+        "fact check",
+        "debunk",
+        "hoax",
+        "conspiracy",
+        "satire",
+        "unfounded",
+        "baseless",
+        "false claim",
+        "misinformation",
+        "misleading",
+    }
+    debunked = sum(
+        1
+        for r in trusted_results
+        if any(
+            kw in (r.get("body", "") + r.get("title", "")).lower()
+            for kw in DEBUNK_KEYWORDS
+        )
+    )
+    confirmed = len(trusted_results) - debunked
+    verdict = "DEBUNKED" if debunked else ("CONFIRMED" if confirmed else "UNCONFIRMED")
+    return {
+        "confirmed_count": confirmed,
+        "debunked_count": debunked,
+        "verdict": verdict,
+        "reasoning": "Keyword-based fallback (Gemini unavailable).",
+    }
+
+
+# Main verification entry-point
 
 
 async def verify_claims(text: str) -> dict[str, Any]:
     """
-    Executes Pillar C logic: Validates the central claim via DuckDuckGo.
+    Full pipeline:
+      1. Extract core claim as a search query (Gemini → POS fallback)
+      2. Search DDG
+      3. Filter to trusted-domain results
+      4. Ask Gemini whether those results actually confirm the claim
     """
-    extracted_query: str = extract_search_query(text)
-
+    # Step 1 — query extraction
+    extracted_query = extract_search_query(text)
     if not extracted_query:
         return {
             "status": "failed_extraction",
+            "verdict": "UNCONFIRMED",
             "corroborated": False,
-            "trusted_matches": 0,
-            "message": "Could not extract verifiable claims from the text.",
+            "query_used": "",
+            "message": "Could not extract a verifiable query from the text.",
         }
 
+    # Step 2 — DDG search
+    all_results: list[dict[str, Any]] = await asyncio.to_thread(
+        _fetch_search_results, extracted_query
+    )
+
+    # Step 3 — filter to trusted sources
+    trusted_results = _filter_trusted(all_results)
+    print(
+        f"[search] {len(all_results)} total results, "
+        f"{len(trusted_results)} from trusted domains"
+    )
+
+    # Step 4 — Gemini verifies whether results CONFIRM the specific claim
     try:
-
-        def search_duckduckgo():
-            ddgs = DDGS()
-            return list(ddgs.text(extracted_query, max_results=10))
-
-        # Run synchronous search in thread pool to keep async interface
-        results = await asyncio.to_thread(search_duckduckgo)
-
-        # Filter the results locally to see if trusted domains reported on it
-        match_count = 0
-        for result in results:
-            url = result.get("href", "").lower()
-            if any(trusted_domain in url for trusted_domain in TRUSTED_DOMAINS):
-                match_count += 1
-
-        is_corroborated = match_count > 0
-
-        return {
-            "status": "success",
-            "corroborated": is_corroborated,
-            "trusted_matches": match_count,
-            "query_used": extracted_query,
-        }
-
+        verdict_data = _gemini_verify(text, trusted_results)
     except Exception as e:
         return {
             "status": "api_error",
+            "verdict": "UNCONFIRMED",
             "corroborated": False,
-            "trusted_matches": 0,
-            "message": f"Failed to connect to DuckDuckGo: {str(e)}",
+            "query_used": extracted_query,
+            "message": f"Verification step failed: {str(e)}",
         }
+
+    verdict = verdict_data.get("verdict", "UNCONFIRMED")
+    reasoning = verdict_data.get("reasoning", "")
+
+    return {
+        "status": "success",
+        # High-level booleans for easy downstream use
+        "corroborated": verdict == "CONFIRMED",
+        "debunked_by_trusted_sources": verdict == "DEBUNKED",
+        # Detailed breakdown
+        "verdict": verdict,
+        "reasoning": reasoning,
+        "confirmed_count": verdict_data.get("confirmed_count", 0),
+        "debunked_count": verdict_data.get("debunked_count", 0),
+        "trusted_matches": len(trusted_results),
+        "total_results": len(all_results),
+        "query_used": extracted_query,
+    }
