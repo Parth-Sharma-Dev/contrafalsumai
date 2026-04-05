@@ -112,7 +112,7 @@ TRUSTED_DOMAINS: list[str] = [
 ]
 
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 # ── Gemini client (lazy-initialised) ─────────────────────────────────────────
 _gemini_client: genai.Client | None = None
@@ -187,13 +187,18 @@ _QUERY_EXTRACTION_PROMPT = """\
 You are a search-query distillation expert for a fake-news verification system.
 
 Given a piece of text (which may be real or fabricated news), extract the single
-most verifiable, specific factual claim at its core and convert it into a short,
-precise DuckDuckGo search query (4–9 words).
+most verifiable, specific factual claim at its core and convert it into a precise
+DuckDuckGo search query of 8–15 words that preserves as much context as possible.
 
 Rules:
-- Capture the KEY CLAIM: who did what, what was invented/announced/approved.
-- Include the most specific named entities: organisations, people, technologies,
-  places, policy names.
+- The query MUST include BOTH the subject (who/what) AND the event/action (what happened).
+  A query that is only a person's name or an organisation's name is ALWAYS wrong.
+- Capture the KEY CLAIM in full detail: who did what, where, when, to whom, using what.
+- Include ALL specific named entities: organisations, people, technologies, places,
+  product names, policy names, bill names, locations.
+- For claims about death/health/arrest/resignation of a person, ALWAYS include
+  the action word (dead, died, death, arrested, resigned, etc.) in the query.
+- Include numbers, dates, quantities if they are central to the claim.
 - Omit adjectives like "shocking", "revolutionary", "greatest".
 - Omit filler verbs like "said", "claimed", "reported".
 - DO NOT include synonyms, alternatives, or multiple queries.
@@ -201,14 +206,23 @@ Rules:
 
 Examples
 --------
+Input : "Ajit Pawar is dead"
+Output: Ajit Pawar dead death confirmed news
+
 Input : "Scientists at MIT have cured cancer using a new AI drug they call NeuroHeal"
-Output: MIT scientists cured cancer NeuroHeal AI drug
+Output: MIT scientists cured cancer new AI drug NeuroHeal breakthrough
 
 Input : "The Reserve Bank of India has approved Quantum Rupee cryptocurrency for official use"
-Output: Reserve Bank India approved Quantum Rupee cryptocurrency
+Output: Reserve Bank of India approved Quantum Rupee cryptocurrency official
 
-Input : "PM Modi declared a national emergency over floods in Assam"
-Output: Modi national emergency floods Assam
+Input : "PM Modi declared a national emergency over floods in Assam killing 200 people"
+Output: Modi declared national emergency floods Assam 200 killed
+
+Input : "Elon Musk has been arrested by the FBI for securities fraud"
+Output: Elon Musk arrested FBI securities fraud charges
+
+Input : "IIT Bombay student invented a new battery that charges in 30 seconds"
+Output: IIT Bombay student invented battery charges 30 seconds
 """
 
 _JOURNALISM_FILLER: set[str] = {
@@ -239,6 +253,36 @@ _JOURNALISM_FILLER: set[str] = {
     "new",
     "big",
 }
+
+# Action/event words that must never be stripped from the query
+_EVENT_KEYWORDS: set[str] = {
+    "dead",
+    "died",
+    "death",
+    "killed",
+    "arrested",
+    "resigned",
+    "fired",
+    "elected",
+    "won",
+    "lost",
+    "collapsed",
+    "banned",
+    "approved",
+    "launched",
+    "crashed",
+    "attacked",
+    "convicted",
+    "acquitted",
+    "hospitalised",
+    "hospitalized",
+}
+
+
+def _is_bare_name_query(query: str) -> bool:
+    """Return True if the query contains no event/action signal."""
+    words = set(query.lower().split())
+    return not words.intersection(_EVENT_KEYWORDS)
 
 
 def _pos_extract_query(text: str, max_words: int = 8) -> str:
@@ -275,12 +319,30 @@ def _pos_extract_query(text: str, max_words: int = 8) -> str:
     return " ".join(parts[:max_words])
 
 
+def _enrich_with_event_keywords(query: str, original_text: str) -> str:
+    """Append any event keywords from the original text that are missing from the query."""
+    query_words = set(query.lower().split())
+    missing = [
+        kw for kw in _EVENT_KEYWORDS
+        if kw in original_text.lower() and kw not in query_words
+    ]
+    if missing:
+        query = query + " " + " ".join(missing[:3])
+    return query.strip()
+
+
 def extract_search_query(text: str) -> str:
-    raw = _call_gemini(text, _QUERY_EXTRACTION_PROMPT, max_tokens=60)
-    if raw and 2 <= len(raw.split()) <= 12:
+    raw = _call_gemini(text, _QUERY_EXTRACTION_PROMPT, max_tokens=80)
+
+    if raw and 2 <= len(raw.split()) <= 20:
+        if _is_bare_name_query(raw):
+            print(f"[extract] Gemini bare-name query '{raw}' — enriching with event keywords")
+            raw = _enrich_with_event_keywords(raw, text)
         print(f"[extract] Gemini query : '{raw}'")
         return raw
+
     fallback = _pos_extract_query(text)
+    fallback = _enrich_with_event_keywords(fallback, text)
     print(f"[extract] POS fallback : '{fallback}'")
     return fallback
 
@@ -381,20 +443,27 @@ def _gemini_verify(claim: str, trusted_results: list[dict[str, Any]]) -> dict[st
         }
 
     prompt = _build_verification_prompt(claim, trusted_results)
-    raw = _call_gemini(prompt, _VERIFICATION_SYSTEM_PROMPT, max_tokens=200)
+    raw = _call_gemini(prompt, _VERIFICATION_SYSTEM_PROMPT, max_tokens=512)
 
     if not raw:
         # Gemini unavailable — fall back to old keyword approach
         print("[verify] Gemini unavailable, using keyword fallback")
         return _keyword_fallback(trusted_results)
 
-    # Strip markdown fences if model wraps in ```json ... ```
+    print(f"[verify] Raw Gemini response ({len(raw)} chars):\n{raw}\n---")
+
+    # Strip markdown fences
     raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
+
+    # If the model added prose before/after the JSON, extract just the {...} block
+    json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if json_match:
+        raw = json_match.group(0)
 
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
-        print(f"[verify] Could not parse Gemini JSON: {raw!r}")
+    except json.JSONDecodeError as exc:
+        print(f"[verify] Could not parse Gemini JSON: {raw!r}\nError: {exc}")
         return _keyword_fallback(trusted_results)
 
 
@@ -493,3 +562,14 @@ async def verify_claims(text: str) -> dict[str, Any]:
         "total_results": len(all_results),
         "query_used": extracted_query,
     }
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Usage: python fact_check.py 'Your news text here'")
+        sys.exit(1)
+
+    input_text = sys.argv[1]
+    result = asyncio.run(verify_claims(input_text))
+    print(json.dumps(result, indent=2))
