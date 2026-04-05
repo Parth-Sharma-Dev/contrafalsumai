@@ -18,6 +18,7 @@
 ## Overview
 
 ContraFalsum is a **three-pillar hybrid system** that detects fake news through:
+
 - **Pillar A (20%)**: Stylometric analysis — ML-based content classification with explainability
 - **Pillar B (30%)**: Source verification — Domain trustworthiness via TLD and age analysis
 - **Pillar C (50%)**: Fact-checking — Real-time claim verification against trusted news sources
@@ -73,10 +74,12 @@ User Input (Text + Optional URL)
 **Endpoint:** `POST /analyze`
 
 **Input:**
+
 - `text` (string, ≥10 characters): the news content to verify
 - `url` (optional): source URL
 
 **Processing Flow:**
+
 1. Validate input (minimum length check)
 2. Branch into three parallel analysis streams
 3. Synchronously execute Pillar A (ML-based)
@@ -87,6 +90,7 @@ User Input (Text + Optional URL)
 ---
 
 ### Pillar A: Stylometric Analysis
+
 **Weight: 20% of final score | Execution: Synchronous**
 
 #### Text Preprocessing
@@ -102,6 +106,7 @@ Input text undergoes aggressive normalization:
 7. **Lemmatization** — Convert to root form (e.g., "running" → "run", "studies" → "study")
 
 **Example:**
+
 ```
 Input:  "Check out this shocking news! Visit www.fake.com"
 Output: "check shocking news"
@@ -117,6 +122,7 @@ Output: "check shocking news"
   - `verdict`: "FAKE" or "REAL"
 
 **Score Calculation:**
+
 ```
 If model says REAL (label=1):
   content_score = confidence × 100
@@ -134,6 +140,7 @@ Range: 0–100
 - **Output:** Dictionary of suspicious words + their weight
 
 Example output:
+
 ```json
 {
   "shocking": 0.2345,
@@ -145,6 +152,7 @@ Example output:
 ---
 
 ### Pillar B: Source Domain Verification
+
 **Weight: 30% of final score | Execution: Async (parallel to Pillar C)**
 
 #### URL Parsing
@@ -179,6 +187,7 @@ Final: domain_score = max(domain_score, 0.0)
 ```
 
 **Output:**
+
 ```json
 {
   "status": "success",
@@ -192,6 +201,7 @@ Final: domain_score = max(domain_score, 0.0)
 ---
 
 ### Pillar C: Fact-Checking
+
 **Weight: 50% of final score | Execution: Async (parallel to Pillar B)**
 
 This pillar verifies whether the news claim is corroborated by trusted sources.
@@ -201,6 +211,7 @@ This pillar verifies whether the news claim is corroborated by trusted sources.
 **Goal:** Convert free-form text into a concise, searchable query
 
 **Method 1 - Gemini AI (Primary):**
+
 - Use Gemini 2.5 Flash model with system prompt
 - Extract **one** core factual claim (4-9 words)
 - Include named entities, people, organizations, locations
@@ -208,12 +219,14 @@ This pillar verifies whether the news claim is corroborated by trusted sources.
 - Implement rate-limit retry logic (automatic backoff for 429 errors)
 
 **Example:**
+
 ```
 Input:  "Scientists at MIT have cured cancer using a new AI drug called NeuroHeal"
 Output: "MIT scientists cured cancer NeuroHeal AI drug"
 ```
 
 **Method 2 - POS Fallback (if Gemini unavailable):**
+
 - Use NLTK part-of-speech tagging
 - Extract proper nouns (NNP), verbs (VBD/VBN), numbers (CD)
 - Rank by POS priority and frequency
@@ -247,6 +260,7 @@ Output: "MIT scientists cured cancer NeuroHeal AI drug"
   - ⚠️ **UNCONFIRMED** — Results exist but don't confirm/debunk
 
 **Output:**
+
 ```json
 {
   "confirmed_count": 2,
@@ -284,6 +298,7 @@ Range: 0–100
 ```
 
 **Example:**
+
 ```
 Fact:    85 (confirmed by trusted sources)
 Domain:  40 (high-risk TLD)
@@ -316,6 +331,7 @@ Raw = (85 × 0.50) + (40 × 0.30) + (65 × 0.20)
    - If fact-check unconfirmed: cap at **40.0 max**
 
 **Stacking Example:**
+
 ```
 Scenario: Article from sketchy domain, fact-check says CONFIRMED
 Raw score: 50
@@ -342,6 +358,7 @@ If final_score < 50.0:   verdict = "FAKE"
 ### Phase 3: Response Construction
 
 **Return Structure:**
+
 ```json
 {
   "final_verdict": "REAL" | "FAKE",
@@ -369,10 +386,13 @@ If final_score < 50.0:   verdict = "FAKE"
 ## API Endpoints
 
 ### Full Analysis
+
 ```
 POST /analyze
 ```
+
 **Request:**
+
 ```json
 {
   "text": "The string of news content to analyze",
@@ -381,6 +401,7 @@ POST /analyze
 ```
 
 **Response:**
+
 ```json
 {
   "final_verdict": "REAL",
@@ -392,10 +413,13 @@ POST /analyze
 ```
 
 ### Stylometric Analysis Only
+
 ```
 POST /analyze/stylometric
 ```
+
 **Request:**
+
 ```json
 {
   "text": "The string of news content to analyze"
@@ -403,10 +427,13 @@ POST /analyze/stylometric
 ```
 
 ### Source/Domain Analysis Only
+
 ```
 POST /analyze/source
 ```
+
 **Request:**
+
 ```json
 {
   "url": "https://example.com"
@@ -414,10 +441,13 @@ POST /analyze/source
 ```
 
 ### Fact-Check Only
+
 ```
 POST /analyze/fact-check
 ```
+
 **Request:**
+
 ```json
 {
   "text": "The string of news content to fact-check"
@@ -425,6 +455,7 @@ POST /analyze/fact-check
 ```
 
 ### Health Check
+
 ```
 GET /health
 ```
@@ -434,6 +465,7 @@ GET /health
 ## Installation & Setup
 
 ### Prerequisites
+
 - Python 3.9+
 - GEMINI_API_KEY environment variable set
 - Docker (optional)
@@ -441,12 +473,14 @@ GET /health
 ### Local Setup
 
 1. **Clone the repository:**
+
 ```bash
 git clone <repo-url>
 cd FakeNewsAIService
 ```
 
 2. **Create virtual environment:**
+
 ```bash
 python -m venv .venv
 .venv\Scripts\activate  # Windows
@@ -454,17 +488,20 @@ source .venv/bin/activate  # Unix
 ```
 
 3. **Install dependencies:**
+
 ```bash
 pip install -r requirements.txt
 ```
 
 4. **Set environment variables:**
+
 ```bash
 # Create .env file in root directory
 GEMINI_API_KEY=your_api_key_here
 ```
 
 5. **Run the API:**
+
 ```bash
 uvicorn app.main:app --reload
 ```
@@ -483,9 +520,9 @@ docker-compose up --build
 
 ### Environment Variables
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Google Gemini API key for LLM queries |
+| Variable         | Required | Description                           |
+| ---------------- | -------- | ------------------------------------- |
+| `GEMINI_API_KEY` | Yes      | Google Gemini API key for LLM queries |
 
 ### System Tuning
 
@@ -498,15 +535,15 @@ docker-compose up --build
 
 ## Key Design Decisions
 
-| Feature | Why |
-|---------|-----|
-| **Fact-check weighted 50%** | Direct verification is most reliable |
-| **Async Pillars B & C** | Network I/O doesn't block computation |
-| **LIME explainability** | Users see WHY text was flagged |
-| **Override stacking** | Confirmed claims override domain distrust |
+| Feature                     | Why                                        |
+| --------------------------- | ------------------------------------------ |
+| **Fact-check weighted 50%** | Direct verification is most reliable       |
+| **Async Pillars B & C**     | Network I/O doesn't block computation      |
+| **LIME explainability**     | Users see WHY text was flagged             |
+| **Override stacking**       | Confirmed claims override domain distrust  |
 | **Trusted domain curation** | Prevents false positives from fringe sites |
-| **Rate-limit retry logic** | Handles Gemini API quota gracefully |
-| **Debunk hard cap (15.0)** | Prevents credible-looking disinformation |
+| **Rate-limit retry logic**  | Handles Gemini API quota gracefully        |
+| **Debunk hard cap (15.0)**  | Prevents credible-looking disinformation   |
 
 ---
 
